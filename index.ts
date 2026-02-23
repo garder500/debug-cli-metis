@@ -20,9 +20,10 @@ import {
   runRemoteOrderCreate,
 } from "./src/commands/remoteOrderCreate";
 import { runRemoteDossierOpti } from "./src/commands/remoteDossierOpti";
+import { runRemoteProfilSearch } from "./src/commands/remoteProfilSearch";
 import { readJsonFile } from "./src/utils/fileReader";
 import { encrypteDossierId } from "./src/utils/folderUtils";
-import { DEFAULT_AERIAL_BASE_URL } from "./src/utils/baseUrl";
+import { DEFAULT_AERIAL_BASE_URL, getDashboardBaseUrl } from "./src/utils/baseUrl";
 
 const DEFAULT_SAMPLE_FILE =
   "SABRE_IMPACT-Parrot_PAX1_NA_AIRSHOPPING_RS_2026-02-02_14-39-27-156.json";
@@ -267,6 +268,98 @@ function applyRouteToPayload(
   return { payload: clonedPayload, updatedFlights };
 }
 
+function applyOraToPayload(payload: unknown, ora: string): { payload: unknown; updatedOras: number } {
+  if (!isRecord(payload)) {
+    return { payload, updatedOras: 0 };
+  }
+
+  const clonedPayload = structuredClone(payload) as unknown;
+  if (!isRecord(clonedPayload)) {
+    return { payload, updatedOras: 0 };
+  }
+
+  const normalizedOra = ora.trim().toUpperCase();
+  if (!normalizedOra) {
+    return { payload: clonedPayload, updatedOras: 0 };
+  }
+
+  clonedPayload.oras = [normalizedOra];
+  if (Array.isArray(clonedPayload.selectedAirline)) {
+    clonedPayload.selectedAirline = [normalizedOra];
+  }
+
+  return { payload: clonedPayload, updatedOras: 1 };
+}
+
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date.getTime());
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function formatDateOnly(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function randomInt(min: number, max: number): number {
+  const minValue = Math.ceil(min);
+  const maxValue = Math.floor(max);
+  return Math.floor(Math.random() * (maxValue - minValue + 1)) + minValue;
+}
+
+function getRandomTripDates(): { outbound: string; inbound: string } {
+  const today = new Date();
+  const outboundOffset = randomInt(7, 120);
+  const inboundOffset = outboundOffset + randomInt(3, 14);
+  const outbound = formatDateOnly(addDays(today, outboundOffset));
+  const inbound = formatDateOnly(addDays(today, inboundOffset));
+  return { outbound, inbound };
+}
+
+function getDefaultFlightDates(payload: unknown): { outbound?: string; inbound?: string } {
+  if (!isRecord(payload)) {
+    return {};
+  }
+
+  const flights = Array.isArray(payload.flights) ? payload.flights : [];
+  const firstFlight = isRecord(flights[0]) ? flights[0] : undefined;
+  const dates = Array.isArray(firstFlight?.dates) ? firstFlight?.dates : [];
+  const outbound = readString(dates[0]);
+  const inbound = readString(dates[1]);
+  return { outbound, inbound };
+}
+
+function applyDatesToPayload(
+  payload: unknown,
+  dates: { outbound?: string; inbound?: string }
+): { payload: unknown; updatedFlights: number } {
+  if (!isRecord(payload)) {
+    return { payload, updatedFlights: 0 };
+  }
+
+  const clonedPayload = structuredClone(payload) as unknown;
+  if (!isRecord(clonedPayload)) {
+    return { payload, updatedFlights: 0 };
+  }
+
+  const flights = Array.isArray(clonedPayload.flights) ? clonedPayload.flights : [];
+  let updatedFlights = 0;
+  for (const flight of flights) {
+    if (!isRecord(flight)) continue;
+    const flightDates = Array.isArray(flight.dates) ? flight.dates : [];
+    if (dates.outbound) {
+      flightDates[0] = dates.outbound;
+    }
+    if (dates.inbound) {
+      flightDates[1] = dates.inbound;
+    }
+    flight.dates = flightDates;
+    updatedFlights += 1;
+  }
+
+  return { payload: clonedPayload, updatedFlights };
+}
+
 async function suggestLocationChoices(
   amadeusAccessToken: string,
   destinationCache: Map<string, DestinationOption[]>,
@@ -333,7 +426,12 @@ function buildOfferPriceRequestPayload(
   return payload;
 }
 
-function normalizeOrderCreatePax(pax: unknown, ora: string, index: number): unknown {
+function normalizeOrderCreatePax(
+  pax: unknown,
+  ora: string,
+  index: number,
+  profile?: Record<string, unknown>
+): unknown {
   if (!isRecord(pax)) {
     return pax;
   }
@@ -375,6 +473,82 @@ function normalizeOrderCreatePax(pax: unknown, ora: string, index: number): unkn
         : [],
       isInf: false,
     };
+  }
+
+  if (profile) {
+    const physical = asRecord(profile.physical) ?? {};
+    const legal = asRecord(profile.legal) ?? {};
+    const emails = asArray(profile.email);
+    const phones = asArray(profile.phone);
+    const documents = asArray(profile.document);
+    const firstEmail = asRecord(emails[0]);
+    const firstPhone = asRecord(phones[0]);
+    const firstDoc = asRecord(documents[0]);
+
+    clonedPax.profileId = profile.id ?? clonedPax.profileId;
+    clonedPax.individualInfo = {
+      titleName: readFirstString(physical.civility, clonedPax.individualInfo?.titleName),
+      surname: readFirstString(physical.last_name, clonedPax.individualInfo?.surname),
+      givenName: readFirstString(physical.first_name, clonedPax.individualInfo?.givenName),
+      birthdate: readFirstString(physical.birthday, clonedPax.individualInfo?.birthdate),
+      entreprise: readFirstString(physical.entreprise, legal.name, clonedPax.individualInfo?.entreprise),
+    };
+
+    if (documents.length > 0) {
+      clonedPax.docsList = structuredClone(documents);
+    }
+
+    if (firstDoc) {
+      clonedPax.docs = {
+        id: firstDoc.id,
+        type: readString(firstDoc.type) ?? null,
+        document_number: readString(firstDoc.document_number) ?? null,
+        expire_date: readString(firstDoc.expire_date) ?? null,
+        country: readString(firstDoc.country) ?? null,
+        date_emission: readString(firstDoc.date_emission) ?? null,
+        nationalities: readString(firstDoc.nationalities) ?? null,
+        residenceCountryCode: readString(firstDoc.residenceCountryCode) ?? "",
+      };
+    }
+
+    clonedPax.contactInfo = {
+      emailAddress: readFirstString(firstEmail?.email) ?? "",
+      phoneNumber: readFirstString(firstPhone?.number) ?? "",
+    };
+
+    if (profile.accessibility) {
+      clonedPax.accessibility = structuredClone(profile.accessibility);
+    }
+
+    clonedPax.profilInfo = {
+      facturation: profile.facturation ?? null,
+      remarque: profile.remarque ?? null,
+      mod_before_sale: profile.mod_before_sale ?? false,
+      sent_facturation: profile.sent_facturation ?? false,
+      sent_suppliers: profile.sent_suppliers ?? false,
+      see_checkout: profile.see_checkout ?? false,
+      cost_center: profile.cost_center ?? null,
+      department: profile.department ?? null,
+      project_number: profile.project_number ?? null,
+      job_title: profile.job_title ?? null,
+      id_legal: profile.id_legal ?? null,
+      id_agence: profile.id_agence ?? null,
+      GuidTripstack: profile.GuidTripstack ?? null,
+      language: profile.language ?? null,
+    };
+
+    if (Array.isArray(profile.remarques)) {
+      clonedPax.remarques = structuredClone(profile.remarques);
+    }
+  }
+
+  if (Array.isArray(clonedPax.remarques)) {
+    const hasCanal = clonedPax.remarques.some(
+      (entry) => isRecord(entry) && readString(entry.type) === "CANAL"
+    );
+    if (!hasCanal) {
+      clonedPax.remarques.unshift({ type: "CANAL", remarque: "OFFLINE", service: "ALL" });
+    }
   }
 
   const contactInfo = asRecord(clonedPax.contactInfo);
@@ -529,12 +703,13 @@ function resolveOrderCreateProvider(ora: string): string {
   return normalizedOra || "IBERIA";
 }
 
-function buildOrderCreateUrl(ora: string): string {
+function buildOrderCreateUrl(ora: string, baseUrl: string = DEFAULT_REMOTE_ORDER_CREATE_BASE_URL): string {
   const provider = resolveOrderCreateProvider(ora);
-  return `${DEFAULT_REMOTE_ORDER_CREATE_BASE_URL}/${provider}/order/orderCreateRQ`;
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+  return `${normalizedBaseUrl}/${provider}/order/orderCreateRQ`;
 }
 
-function extractFolderIdFromOrderCreateResponse(response: unknown): string | null {
+function extractFolderIdFromOrderCreateResponse(response: unknown): number | null {
   if (!isRecord(response)) {
     return null;
   }
@@ -542,12 +717,12 @@ function extractFolderIdFromOrderCreateResponse(response: unknown): string | nul
   const value = asRecord(response.value) ?? {};
   const folderIdString = readFirstString(value.folderId, value.FolderID, value.folderID);
   if (folderIdString) {
-    return folderIdString;
+    return Number(folderIdString);
   }
 
   const folderIdNumber = readFirstNumber(value.folderId, value.FolderID, value.folderID);
   if (folderIdNumber !== null) {
-    return String(folderIdNumber);
+    return Number(folderIdNumber);
   }
 
   return null;
@@ -556,7 +731,8 @@ function extractFolderIdFromOrderCreateResponse(response: unknown): string | nul
 function buildOrderCreateRequestPayload(
   candidate: OfferPriceCandidate,
   shoppingPayload: unknown,
-  offerPriceResponse: unknown
+  offerPriceResponse: unknown,
+  profile?: Record<string, unknown>
 ): Record<string, unknown> {
   if (!isRecord(offerPriceResponse)) {
     throw new Error("Reponse offerPrice invalide pour construire orderCreateRQ.");
@@ -582,7 +758,7 @@ function buildOrderCreateRequestPayload(
   }));
 
   const paxs = asArray(shoppingPayloadRecord.paxs).map((pax, paxIndex) =>
-    normalizeOrderCreatePax(pax, ora, paxIndex)
+    normalizeOrderCreatePax(pax, ora, paxIndex, profile)
   );
   const agenceInfo = isRecord(shoppingPayloadRecord.agenceInfo)
     ? structuredClone(shoppingPayloadRecord.agenceInfo)
@@ -907,7 +1083,8 @@ function getReturnOffers(
   return offers.filter(
     (offer) =>
       offer.offerId !== selectedOffer.offerId &&
-      offer.outbound === selectedOffer.outbound
+      offer.outbound === selectedOffer.outbound &&
+      (!selectedOffer.airlineDesigCode || offer.airlineDesigCode === selectedOffer.airlineDesigCode)
   );
 }
 
@@ -1032,6 +1209,9 @@ async function main() {
         }
         case "interactive":
           await runRemoteInteractive();
+          break;
+        case "auto":
+          await runRemoteAuto();
           break;
         default:
           printUsage();
@@ -1380,7 +1560,8 @@ async function runRemoteInteractive() {
 
   let continueSearch = true;
   let lastPayload = "examples/remote-shopping-payload.sample.json";
-  let lastUrl = DEFAULT_REMOTE_SHOPPING_URL;
+  let lastUrl = DEFAULT_AERIAL_BASE_URL;
+  let lastSearchName = "";
   let lastMax = "25";
   let lastTokenInput = "Bearer ";
 
@@ -1396,7 +1577,7 @@ async function runRemoteInteractive() {
         {
           type: "text",
           name: "url",
-          message: "URL airShoppingRQ",
+          message: "Base URL (ex: http://localhost:3000/aerial)",
           initial: lastUrl,
         },
         {
@@ -1425,7 +1606,9 @@ async function runRemoteInteractive() {
     }
 
     const payloadFile = String(answers.payload);
-    const requestUrl = String(answers.url || DEFAULT_REMOTE_SHOPPING_URL);
+    const baseUrl = String(answers.url || DEFAULT_AERIAL_BASE_URL).replace(/\/+$/, "");
+    const dashboardBaseUrl = getDashboardBaseUrl(baseUrl);
+    const requestUrl = `${baseUrl}/global/airShoppingRQ`;
     const parsedMax = Number.parseInt(String(answers.max || "25"), 10);
     if (!Number.isFinite(parsedMax) || parsedMax <= 0) {
       console.error("Valeur invalide pour le max. Entrez un entier positif.");
@@ -1441,7 +1624,7 @@ async function runRemoteInteractive() {
     }
 
     lastPayload = payloadFile;
-    lastUrl = requestUrl;
+    lastUrl = baseUrl;
     lastMax = String(parsedMax);
     lastTokenInput = bearerToken;
 
@@ -1513,12 +1696,43 @@ async function runRemoteInteractive() {
 
     try {
       const payload = await readJsonFile<unknown>(payloadFile);
-      const payloadUpdate = applyRouteToPayload(payload, {
+      const defaultDates = getDefaultFlightDates(payload);
+      const dateAnswers = await prompts(
+        [
+          {
+            type: "text",
+            name: "outbound",
+            message: "Date aller (YYYY-MM-DD)",
+            initial: defaultDates.outbound ?? "",
+          },
+          {
+            type: "text",
+            name: "inbound",
+            message: "Date retour (YYYY-MM-DD, optionnel)",
+            initial: defaultDates.inbound ?? "",
+          },
+        ],
+        {
+          onCancel: () => false,
+        }
+      );
+
+      const updatedDates = {
+        outbound: String(dateAnswers.outbound || "").trim() || undefined,
+        inbound: String(dateAnswers.inbound || "").trim() || undefined,
+      };
+
+      const payloadRouteUpdate = applyRouteToPayload(payload, {
         departure: selectedDeparture,
         arrival: selectedArrival,
       });
-      if (payloadUpdate.updatedFlights === 0) {
+      if (payloadRouteUpdate.updatedFlights === 0) {
         console.warn("Aucun segment flights[] n'a ete mis a jour dans le payload.");
+      }
+
+      const payloadDateUpdate = applyDatesToPayload(payloadRouteUpdate.payload, updatedDates);
+      if (payloadDateUpdate.updatedFlights === 0) {
+        console.warn("Aucun segment flights[].dates n'a ete mis a jour dans le payload.");
       }
 
       console.log(`Depart selectionne: ${formatDestinationLabel(selectedDeparture)}`);
@@ -1527,7 +1741,7 @@ async function runRemoteInteractive() {
       const result = await runRemoteShopping({
         payloadFile,
         url: requestUrl || undefined,
-        payloadOverride: payloadUpdate.payload,
+        payloadOverride: payloadDateUpdate.payload,
         requestHeaders: {
           authorization: bearerToken,
         },
@@ -1582,6 +1796,8 @@ async function runRemoteInteractive() {
 
         let currentOffer: OfferSummaryRow | null = paginationAction.offer;
         let currentOrderCreatePayload: Record<string, unknown> | null = null;
+        let currentOfferPriceResponse: unknown | null = null;
+        let currentProfile: Record<string, unknown> | null = null;
         while (currentOffer && continueSearch) {
           const offerPriceCandidate = result.offerPriceCandidates[currentOffer.offerId];
           if (!offerPriceCandidate) {
@@ -1597,13 +1813,13 @@ async function runRemoteInteractive() {
 
           const offerPricePayload = buildOfferPriceRequestPayload(
             offerPriceCandidate,
-            payloadUpdate.payload
+            payloadDateUpdate.payload
           );
 
           try {
             const offerPriceResult = await runRemoteOfferPrice({
               payload: offerPricePayload,
-              url: DEFAULT_REMOTE_OFFER_PRICE_URL,
+              url: `${baseUrl}/global/offerPriceRQ`,
               requestHeaders: {
                 authorization: bearerToken,
               },
@@ -1612,19 +1828,22 @@ async function runRemoteInteractive() {
             console.log(`OfferPrice response message: ${offerPriceResult.message}`);
             console.log(`OfferPrice output written to: ${offerPriceResult.outputDir}`);
             displayOfferPriceInfo(offerPriceResult.response);
+            currentOfferPriceResponse = offerPriceResult.response;
 
             try {
               currentOrderCreatePayload = buildOrderCreateRequestPayload(
                 offerPriceCandidate,
-                payloadUpdate.payload,
+                payloadDateUpdate.payload,
                 offerPriceResult.response
               );
             } catch (buildError) {
               currentOrderCreatePayload = null;
+              currentOfferPriceResponse = null;
               console.error("Impossible de preparer orderCreateRQ:", buildError);
             }
           } catch (error) {
             currentOrderCreatePayload = null;
+            currentOfferPriceResponse = null;
             console.error("Erreur offerPriceRQ:", error);
           }
 
@@ -1635,6 +1854,7 @@ async function runRemoteInteractive() {
               message: "Que souhaitez-vous faire ?",
               choices: [
                 { title: "Choisir offre retour", value: "return" },
+                { title: "Assigner passager", value: "assignPassenger" },
                 { title: "Lancer orderCreateRQ", value: "orderCreate" },
                 { title: "Choisir une autre offre", value: "select" },
                 { title: "Nouvelle recherche", value: "search" },
@@ -1655,22 +1875,137 @@ async function runRemoteInteractive() {
             if (pickedReturnOffer) {
               currentOffer = pickedReturnOffer;
               currentOrderCreatePayload = null;
+              currentOfferPriceResponse = null;
+              currentProfile = null;
               continue;
             }
             continue;
           }
 
+          if (nextAction.action === "assignPassenger") {
+            const agenceInfo = isRecord(payloadDateUpdate.payload)
+              ? (payloadDateUpdate.payload as Record<string, unknown>).agenceInfo
+              : undefined;
+            const agenceId = readFirstNumber(
+              isRecord(agenceInfo) ? agenceInfo.id_agence : undefined,
+              isRecord(agenceInfo) ? agenceInfo.id_agency : undefined
+            );
+
+            const defaultSearchName = lastSearchName || "";
+            const profileAnswers = await prompts(
+              [
+                {
+                  type: "text",
+                  name: "searchName",
+                  message: "Recherche passager (searchName)",
+                  initial: defaultSearchName,
+                },
+                {
+                  type: "text",
+                  name: "agenceId",
+                  message: "Agence ID",
+                  initial: agenceId !== null ? String(agenceId) : "",
+                },
+              ],
+              {
+                onCancel: () => false,
+              }
+            );
+
+            const searchName = String(profileAnswers.searchName || "").trim();
+            const agenceIdValue = Number.parseInt(String(profileAnswers.agenceId || ""), 10);
+            if (!searchName || !Number.isFinite(agenceIdValue)) {
+              console.error("searchName/agenceId invalides.");
+              continue;
+            }
+
+            lastSearchName = searchName;
+
+            try {
+              const profilSearchResult = await runRemoteProfilSearch({
+                payload: {
+                  searchName,
+                  agenceId: agenceIdValue,
+                },
+                url: `${dashboardBaseUrl}/api/profil/search`,
+                requestHeaders: {
+                  authorization: bearerToken,
+                },
+              });
+
+              console.log(`Profil search message: ${profilSearchResult.message}`);
+              console.log(`Profil search output written to: ${profilSearchResult.outputDir}`);
+
+              const responseRecord = isRecord(profilSearchResult.response)
+                ? (profilSearchResult.response as Record<string, unknown>)
+                : {};
+              const values = Array.isArray(responseRecord.values) ? responseRecord.values : [];
+              if (values.length === 0) {
+                console.warn("Aucun profil trouve.");
+                continue;
+              }
+
+              const choices = values.slice(0, 10).map((entry, idx) => {
+                const record = isRecord(entry) ? entry : {};
+                const physical = isRecord(record.physical) ? record.physical : {};
+                const label = `${readString(physical.first_name) ?? "?"} ${readString(physical.last_name) ?? "?"}`.trim();
+                const profileId = readFirstString(record.id, record.profileId) ?? String(idx + 1);
+                return { title: `${label} (#${profileId})`, value: idx };
+              });
+
+              const pick = await prompts(
+                {
+                  type: "select",
+                  name: "value",
+                  message: "Choisir un profil",
+                  choices,
+                  initial: 0,
+                },
+                {
+                  onCancel: () => false,
+                }
+              );
+
+              const pickedIndex = Number.parseInt(String(pick.value), 10);
+              if (Number.isNaN(pickedIndex) || pickedIndex < 0 || pickedIndex >= values.length) {
+                console.error("Selection profil invalide.");
+                continue;
+              }
+
+              currentProfile = isRecord(values[pickedIndex])
+                ? (values[pickedIndex] as Record<string, unknown>)
+                : null;
+              console.log("Passager assigne.");
+              currentOrderCreatePayload = null;
+            } catch (error) {
+              console.error("Erreur profil search:", error);
+            }
+            continue;
+          }
+
           if (nextAction.action === "orderCreate") {
-            if (!currentOrderCreatePayload) {
+            if (!currentOfferPriceResponse) {
               console.error("orderCreateRQ indisponible: lancer offerPrice avec succes d'abord.");
               continue;
             }
 
+            if (!currentProfile) {
+              console.error("Passager non assigne: utilisez 'Assigner passager' avant orderCreate.");
+              continue;
+            }
+
             try {
-              const orderCreateOra = readString(currentOrderCreatePayload.ora) ?? "IB";
+              const orderCreatePayload = buildOrderCreateRequestPayload(
+                offerPriceCandidate,
+                payloadDateUpdate.payload,
+                currentOfferPriceResponse,
+                currentProfile
+              );
+              const orderCreateOra = readString(orderCreatePayload.ora) ?? "IB";
+
               const orderCreateResult = await runRemoteOrderCreate({
-                payload: currentOrderCreatePayload,
-                url: buildOrderCreateUrl(orderCreateOra),
+                payload: orderCreatePayload,
+                url: buildOrderCreateUrl(orderCreateOra, baseUrl),
                 requestHeaders: {
                   authorization: bearerToken,
                 },
@@ -1690,6 +2025,7 @@ async function runRemoteInteractive() {
                 const dossierOptiResult = await runRemoteDossierOpti({
                   folderId,
                   encryptedFolderId,
+                  url: `${baseUrl}/dossier/dossiers/opti`,
                   requestHeaders: {
                     authorization: bearerToken,
                   },
@@ -1729,12 +2065,255 @@ async function runRemoteInteractive() {
   }
 }
 
+async function runRemoteAuto() {
+  console.log("Metis - Remote Shopping (mode auto)");
+
+  const answers = await prompts(
+    [
+      {
+        type: "text",
+        name: "payload",
+        message: "Chemin du payload JSON",
+        initial: "examples/remote-shopping-payload.sample.json",
+      },
+      {
+        type: "text",
+        name: "url",
+        message: "Base URL (ex: http://localhost:3000/aerial)",
+        initial: DEFAULT_AERIAL_BASE_URL,
+      },
+      {
+        type: "text",
+        name: "ora",
+        message: "ORA desire (ex: IB)",
+        initial: "IB",
+      },
+      {
+        type: "text",
+        name: "departure",
+        message: "Depart (IATA, ex: LIS)",
+      },
+      {
+        type: "text",
+        name: "arrival",
+        message: "Arrivee (IATA, ex: CDG)",
+      },
+      {
+        type: "text",
+        name: "searchName",
+        message: "Passager a rechercher (searchName)",
+      },
+      {
+        type: "text",
+        name: "agenceId",
+        message: "Agence ID",
+      },
+      {
+        type: "text",
+        name: "count",
+        message: "Nombre d'executions",
+        initial: "1",
+      },
+      {
+        type: "text",
+        name: "token",
+        message: "Token utilisateur (Bearer ...)",
+        initial: "Bearer ",
+      },
+    ],
+    {
+      onCancel: () => false,
+    }
+  );
+
+  const payloadFile = String(answers.payload || "").trim();
+  const baseUrl = String(answers.url || DEFAULT_AERIAL_BASE_URL).replace(/\/+$/, "");
+  const dashboardBaseUrl = getDashboardBaseUrl(baseUrl);
+  const ora = String(answers.ora || "").trim().toUpperCase();
+  const departureCode = String(answers.departure || "").trim().toUpperCase();
+  const arrivalCode = String(answers.arrival || "").trim().toUpperCase();
+  const searchName = String(answers.searchName || "").trim();
+  const agenceIdValue = Number.parseInt(String(answers.agenceId || ""), 10);
+  const count = Number.parseInt(String(answers.count || "1"), 10);
+
+  if (!payloadFile || !ora || !departureCode || !arrivalCode || !searchName || !Number.isFinite(agenceIdValue)) {
+    console.error("Parametres invalides pour le mode auto.");
+    return;
+  }
+
+  if (!Number.isFinite(count) || count <= 0) {
+    console.error("Le nombre d'executions doit etre un entier positif.");
+    return;
+  }
+
+  let bearerToken: string;
+  try {
+    bearerToken = normalizeBearerToken(String(answers.token || ""));
+  } catch (error) {
+    console.error("Erreur:", error);
+    return;
+  }
+
+  let profile: Record<string, unknown> | null = null;
+  try {
+    const profilSearchResult = await runRemoteProfilSearch({
+      payload: {
+        searchName,
+        agenceId: agenceIdValue,
+      },
+      url: `${dashboardBaseUrl}/api/profil/search`,
+      requestHeaders: {
+        authorization: bearerToken,
+      },
+    });
+
+    console.log(`Profil search message: ${profilSearchResult.message}`);
+    console.log(`Profil search output written to: ${profilSearchResult.outputDir}`);
+
+    const responseRecord = isRecord(profilSearchResult.response)
+      ? (profilSearchResult.response as Record<string, unknown>)
+      : {};
+    const values = Array.isArray(responseRecord.values) ? responseRecord.values : [];
+    if (values.length === 0) {
+      console.error("Aucun profil trouve pour le passager.");
+      return;
+    }
+    profile = isRecord(values[0]) ? (values[0] as Record<string, unknown>) : null;
+  } catch (error) {
+    console.error("Erreur profil search:", error);
+    return;
+  }
+
+  const departure = buildFallbackDestinationFromKeyword(departureCode);
+  const arrival = buildFallbackDestinationFromKeyword(arrivalCode);
+  if (!departure || !arrival) {
+    console.error("Codes IATA invalides pour depart/arrivee.");
+    return;
+  }
+
+  for (let runIndex = 0; runIndex < count; runIndex += 1) {
+    console.log(`\n--- Execution auto ${runIndex + 1}/${count} ---`);
+    let payload: unknown;
+    try {
+      payload = await readJsonFile<unknown>(payloadFile);
+    } catch (error) {
+      console.error("Erreur lecture payload:", error);
+      return;
+    }
+
+    const randomDates = getRandomTripDates();
+    const payloadRouteUpdate = applyRouteToPayload(payload, { departure, arrival });
+    const payloadDateUpdate = applyDatesToPayload(payloadRouteUpdate.payload, randomDates);
+    const payloadOraUpdate = applyOraToPayload(payloadDateUpdate.payload, ora);
+
+    const requestUrl = `${baseUrl}/global/airShoppingRQ`;
+    let shoppingResult: Awaited<ReturnType<typeof runRemoteShopping>> | null = null;
+    try {
+      shoppingResult = await runRemoteShopping({
+        payloadFile,
+        url: requestUrl,
+        payloadOverride: payloadOraUpdate.payload,
+        requestHeaders: {
+          authorization: bearerToken,
+        },
+      });
+    } catch (error) {
+      console.error("Erreur airShoppingRQ:", error);
+      continue;
+    }
+
+    console.log(`Offers found: ${shoppingResult.rows.length}`);
+    if (shoppingResult.rows.length === 0) {
+      console.warn("Aucune offre disponible.");
+      continue;
+    }
+
+    const filteredOffers = shoppingResult.rows.filter(
+      (row) => !ora || row.airlineDesigCode === ora
+    );
+    const selectedOffer = filteredOffers[0] ?? shoppingResult.rows[0];
+    const returnOffers = getReturnOffers(shoppingResult.rows, selectedOffer);
+    const finalOffer = returnOffers[0] ?? selectedOffer;
+
+    const offerPriceCandidate = shoppingResult.offerPriceCandidates[finalOffer.offerId];
+    if (!offerPriceCandidate || offerPriceCandidate.offerIdList.length === 0) {
+      console.error("Offre selectionnee invalide pour offerPriceRQ.");
+      continue;
+    }
+
+    let offerPriceResponse: unknown;
+    try {
+      const offerPricePayload = buildOfferPriceRequestPayload(
+        offerPriceCandidate,
+        payloadOraUpdate.payload
+      );
+      const offerPriceResult = await runRemoteOfferPrice({
+        payload: offerPricePayload,
+        url: `${baseUrl}/global/offerPriceRQ`,
+        requestHeaders: {
+          authorization: bearerToken,
+        },
+      });
+      offerPriceResponse = offerPriceResult.response;
+    } catch (error) {
+      console.error("Erreur offerPriceRQ:", error);
+      continue;
+    }
+
+    try {
+      const orderCreatePayload = buildOrderCreateRequestPayload(
+        offerPriceCandidate,
+        payloadOraUpdate.payload,
+        offerPriceResponse,
+        profile
+      );
+      const orderCreateOra = readString(orderCreatePayload.ora) ?? ora;
+      const orderCreateResult = await runRemoteOrderCreate({
+        payload: orderCreatePayload,
+        url: buildOrderCreateUrl(orderCreateOra, baseUrl),
+        requestHeaders: {
+          authorization: bearerToken,
+        },
+      });
+
+      console.log(`OrderCreate response message: ${orderCreateResult.message}`);
+      console.log(`OrderCreate output written to: ${orderCreateResult.outputDir}`);
+
+      const folderId = extractFolderIdFromOrderCreateResponse(orderCreateResult.response);
+      if (!folderId) {
+        console.warn("folderId absent de orderCreateRS, appel dossier opti ignore.");
+        continue;
+      }
+
+      try {
+        const encryptedFolderId = encrypteDossierId(folderId);
+        const dossierOptiResult = await runRemoteDossierOpti({
+          folderId,
+          encryptedFolderId,
+          url: `${baseUrl}/dossier/dossiers/opti`,
+          requestHeaders: {
+            authorization: bearerToken,
+          },
+        });
+
+        console.log(`Dossier opti response message: ${dossierOptiResult.message}`);
+        console.log(`Dossier opti output written to: ${dossierOptiResult.outputDir}`);
+      } catch (error) {
+        console.error("Erreur dossier opti:", error);
+      }
+    } catch (error) {
+      console.error("Erreur orderCreateRQ:", error);
+    }
+  }
+}
+
 function printUsage() {
   console.error("Usage: metis-db <command> <subcommand> [options]");
   console.error("Commands:");
   console.error("  sabre shopping --file <filename> [--flight <code] [--brand <name>] [--offer <id>] [--sort <field>]");
   console.error("  remote shopping --payload <filename> [--url <http-url>] [--max <count>]");
   console.error("  remote interactive");
+  console.error("  remote auto");
   console.error("  interactive");
   console.error("  interactive remote");
   console.error("    --flight: Filter by flight number (e.g. AF123)");

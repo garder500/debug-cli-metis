@@ -33,6 +33,7 @@ export interface OfferSummaryRow {
   currency: string;
   cabinType: string;
   baggage: string;
+  airlineDesigCode: string;
 }
 
 export type OfferIdListItem = Record<string, unknown> & {
@@ -268,6 +269,8 @@ function collectOfferRows(response: AirShoppingResponse): {
         const baggageRef = readString(baggageNode?.BaggageAllowanceRefID);
         const baggage = baggageRef ? bagById.get(baggageRef) ?? baggageRef : "N/A";
 
+        const airlineDesigCode = readString(offer.OwnerCode) ?? "";
+
         const row: OfferSummaryRow = {
           offerId,
           outbound,
@@ -276,6 +279,7 @@ function collectOfferRows(response: AirShoppingResponse): {
           currency,
           cabinType,
           baggage,
+          airlineDesigCode,
         };
         const offerPriceCandidate = buildOfferPriceCandidate(offer, defaultResponseId);
 
