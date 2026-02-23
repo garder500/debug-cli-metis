@@ -15,11 +15,18 @@ import {
   DEFAULT_REMOTE_OFFER_PRICE_URL,
   runRemoteOfferPrice,
 } from "./src/commands/remoteOfferPrice";
+import {
+  DEFAULT_REMOTE_ORDER_CREATE_BASE_URL,
+  runRemoteOrderCreate,
+} from "./src/commands/remoteOrderCreate";
+import { runRemoteDossierOpti } from "./src/commands/remoteDossierOpti";
 import { readJsonFile } from "./src/utils/fileReader";
+import { encrypteDossierId } from "./src/utils/folderUtils";
+import { DEFAULT_AERIAL_BASE_URL } from "./src/utils/baseUrl";
 
 const DEFAULT_SAMPLE_FILE =
   "SABRE_IMPACT-Parrot_PAX1_NA_AIRSHOPPING_RS_2026-02-02_14-39-27-156.json";
-const DEFAULT_AMADEUS_TOKEN_BRIDGE_URL = "http://localhost:3000/aerial/amadeus/token/get";
+const DEFAULT_AMADEUS_TOKEN_BRIDGE_URL = `${DEFAULT_AERIAL_BASE_URL}/amadeus/token/get`;
 const DEFAULT_AMADEUS_LOCATIONS_URL = "https://api.amadeus.com/v1/reference-data/locations";
 
 interface DestinationOption {
@@ -295,7 +302,7 @@ function buildOfferPriceRequestPayload(
   shoppingPayload: unknown
 ): Record<string, unknown> {
   const shoppingPayloadRecord = isRecord(shoppingPayload) ? shoppingPayload : {};
-  const oras = Array.isArray(shoppingPayloadRecord.oras)
+  const originalOras = Array.isArray(shoppingPayloadRecord.oras)
     ? structuredClone(shoppingPayloadRecord.oras)
     : [];
   const paxs = Array.isArray(shoppingPayloadRecord.paxs)
@@ -304,11 +311,13 @@ function buildOfferPriceRequestPayload(
   const agenceInfo = isRecord(shoppingPayloadRecord.agenceInfo)
     ? structuredClone(shoppingPayloadRecord.agenceInfo)
     : {};
-  const fallbackAirlineCode = readString(oras[0]) ?? "";
+  const fallbackAirlineCode = readString(originalOras[0]) ?? "";
+  const resolvedAirlineDesigCode = candidate.airlineDesigCode || fallbackAirlineCode;
+  const oras = resolvedAirlineDesigCode ? [resolvedAirlineDesigCode] : [];
 
   const payload: Record<string, unknown> = {
     OfferID: candidate.offerId,
-    AirlineDesigCode: candidate.airlineDesigCode || fallbackAirlineCode,
+    AirlineDesigCode: resolvedAirlineDesigCode,
     OfferIdList: structuredClone(candidate.offerIdList),
     oras,
     responseId: candidate.responseId ?? "",
@@ -319,6 +328,290 @@ function buildOfferPriceRequestPayload(
 
   if (candidate.totalPrice !== undefined) {
     payload.TotalPrice = structuredClone(candidate.totalPrice);
+  }
+
+  return payload;
+}
+
+function normalizeOrderCreatePax(pax: unknown, ora: string, index: number): unknown {
+  if (!isRecord(pax)) {
+    return pax;
+  }
+
+  const clonedPax = structuredClone(pax) as Record<string, unknown>;
+  const paxId = readFirstString(clonedPax.paxId, clonedPax.id, clonedPax.PaxID) ?? "";
+  if (paxId) {
+    clonedPax.paxId = paxId;
+    clonedPax.idDataPax = clonedPax.idDataPax ?? paxId;
+    clonedPax.id = clonedPax.id ?? paxId;
+  }
+
+  clonedPax.fidelityCard = Array.isArray(clonedPax.fidelityCard)
+    ? clonedPax.fidelityCard
+    : [];
+  clonedPax.cartesFidelities = Array.isArray(clonedPax.cartesFidelities)
+    ? clonedPax.cartesFidelities
+    : [];
+  clonedPax.cartesSubscriptions = Array.isArray(clonedPax.cartesSubscriptions)
+    ? clonedPax.cartesSubscriptions
+    : [];
+  clonedPax.remarques = Array.isArray(clonedPax.remarques)
+    ? clonedPax.remarques
+    : [];
+
+  if (!clonedPax._other) {
+    clonedPax._other = {
+      PaxID: paxId || undefined,
+      PTC: readFirstString(clonedPax.ptc, clonedPax.PTC),
+      __index: typeof clonedPax.__index === "number" ? clonedPax.__index : index,
+      LoyaltyProgramAccount: [],
+      PaxIDList: paxId
+        ? [
+          {
+            ora,
+            PaxID: paxId,
+          },
+        ]
+        : [],
+      isInf: false,
+    };
+  }
+
+  const contactInfo = asRecord(clonedPax.contactInfo);
+  if (contactInfo) {
+    const emailAddressValue = contactInfo.emailAddress;
+    if (Array.isArray(emailAddressValue)) {
+      const firstEmail = asRecord(emailAddressValue[0]);
+      const email = readFirstString(firstEmail?.email, firstEmail?.Email);
+      if (email) {
+        contactInfo.emailAddress = email;
+      }
+    }
+
+    const phoneNumberValue = contactInfo.phoneNumber;
+    if (Array.isArray(phoneNumberValue)) {
+      const firstPhone = asRecord(phoneNumberValue[0]);
+      const phone = readFirstString(firstPhone?.number, firstPhone?.Number);
+      if (phone) {
+        contactInfo.phoneNumber = phone;
+      }
+    }
+
+    clonedPax.contactInfo = contactInfo;
+  } else {
+    clonedPax.contactInfo = clonedPax.contactInfo ?? { emailAddress: "", phoneNumber: "" };
+  }
+
+  const docs = asRecord(clonedPax.docs);
+  if (!docs) {
+    const docsList = asArray(clonedPax.docsList);
+    const firstDoc = asRecord(docsList[0]);
+    if (firstDoc) {
+      clonedPax.docs = {
+        id: firstDoc.id,
+        type: readString(firstDoc.type) ?? null,
+        document_number: readString(firstDoc.document_number) ?? null,
+        expire_date: readString(firstDoc.expire_date) ?? null,
+        country: readString(firstDoc.country) ?? null,
+        date_emission: readString(firstDoc.date_emission) ?? null,
+        nationalities: readString(firstDoc.nationalities) ?? null,
+        residenceCountryCode: readString(firstDoc.residenceCountryCode) ?? "",
+      };
+    } else if (docs) {
+      clonedPax.docs = docs;
+    }
+  }
+
+  return clonedPax;
+}
+
+function buildOrderCreateConditions(orderItems: unknown[]): Record<string, unknown> {
+  const conditions: Record<string, unknown> = {};
+
+  const fares = orderItems.flatMap((orderItem) => {
+    const item = asRecord(orderItem) ?? {};
+    return [...asArray(item.Fare), ...asArray(item.fare)];
+  });
+
+  for (const fare of fares) {
+    const fareRecord = asRecord(fare);
+    if (!fareRecord) {
+      continue;
+    }
+
+    const fareRule = asRecord(fareRecord.FareRule) ?? asRecord(fareRecord.fareRule) ?? {};
+    const penalties = [...asArray(fareRule.Penalty), ...asArray(fareRule.penalties)];
+
+    for (const penalty of penalties) {
+      const penaltyRecord = asRecord(penalty);
+      if (!penaltyRecord) {
+        continue;
+      }
+
+      const typeCode = readFirstString(penaltyRecord.TypeCode, penaltyRecord.typeCode);
+      const appCode = readFirstString(penaltyRecord.AppCode, penaltyRecord.appCode);
+      if (!typeCode || !appCode) {
+        continue;
+      }
+
+      const penaltyAmount = readFirstNumber(penaltyRecord.PenaltyAmount, penaltyRecord.amount);
+      const changeFeeIndRaw = readFirstString(penaltyRecord.ChangeFeeInd, penaltyRecord.changeFeeInd);
+      const changeFeeInd = changeFeeIndRaw === "true";
+
+      conditions[`${typeCode}${appCode}`] = {
+        title: typeCode,
+        available: penaltyAmount !== null || changeFeeInd,
+        cancel: null,
+        change: changeFeeInd ? true : null,
+        date: appCode,
+        price: penaltyAmount,
+      };
+    }
+  }
+
+  return conditions;
+}
+
+function buildOrderCreatePeriods(offerPriceValue: Record<string, unknown>): Array<Record<string, unknown>> {
+  const dataLists = asRecord(offerPriceValue.DataLists) ?? {};
+  const segments = [...asArray(dataLists.PaxSegmentList), ...asArray(dataLists.PaxSegment)];
+  const orderItems = asArray(offerPriceValue.OrderItems);
+  const conditions = buildOrderCreateConditions(orderItems);
+
+  const groupedByDate = new Map<string, Array<{ segDep: string; segArv: string }>>();
+  for (const segment of segments) {
+    const segmentRecord = asRecord(segment);
+    if (!segmentRecord) {
+      continue;
+    }
+
+    const dep = asRecord(segmentRecord.Dep) ?? {};
+    const arrival = asRecord(segmentRecord.Arrival) ?? {};
+    const segDep = readString(dep.IATALocationCode);
+    const segArv = readString(arrival.IATALocationCode);
+    const depDateTime = readString(dep.AircraftScheduledDateTime);
+    const depDate = depDateTime ? depDateTime.slice(0, 10) : "N/A";
+
+    if (!segDep || !segArv) {
+      continue;
+    }
+
+    const existing = groupedByDate.get(depDate) ?? [];
+    existing.push({ segDep, segArv });
+    groupedByDate.set(depDate, existing);
+  }
+
+  if (groupedByDate.size === 0) {
+    return [];
+  }
+
+  const periods: Array<Record<string, unknown>> = [];
+  for (const [, routes] of groupedByDate) {
+    const firstRoute = routes[0];
+    const lastRoute = routes[routes.length - 1];
+    periods.push({
+      segDep: firstRoute.segDep,
+      segArv: lastRoute.segArv,
+      salePeriod: "",
+      travelPeriod: "",
+      conditions: structuredClone(conditions),
+    });
+  }
+
+  return periods;
+}
+
+function resolveOrderCreateProvider(ora: string): string {
+  const normalizedOra = ora.trim().toUpperCase();
+  if (normalizedOra === "IB") {
+    return "IBERIA";
+  }
+  return normalizedOra || "IBERIA";
+}
+
+function buildOrderCreateUrl(ora: string): string {
+  const provider = resolveOrderCreateProvider(ora);
+  return `${DEFAULT_REMOTE_ORDER_CREATE_BASE_URL}/${provider}/order/orderCreateRQ`;
+}
+
+function extractFolderIdFromOrderCreateResponse(response: unknown): string | null {
+  if (!isRecord(response)) {
+    return null;
+  }
+
+  const value = asRecord(response.value) ?? {};
+  const folderIdString = readFirstString(value.folderId, value.FolderID, value.folderID);
+  if (folderIdString) {
+    return folderIdString;
+  }
+
+  const folderIdNumber = readFirstNumber(value.folderId, value.FolderID, value.folderID);
+  if (folderIdNumber !== null) {
+    return String(folderIdNumber);
+  }
+
+  return null;
+}
+
+function buildOrderCreateRequestPayload(
+  candidate: OfferPriceCandidate,
+  shoppingPayload: unknown,
+  offerPriceResponse: unknown
+): Record<string, unknown> {
+  if (!isRecord(offerPriceResponse)) {
+    throw new Error("Reponse offerPrice invalide pour construire orderCreateRQ.");
+  }
+
+  const offerPriceValue = extractOfferPriceValue(offerPriceResponse);
+  const shoppingPayloadRecord = isRecord(shoppingPayload) ? shoppingPayload : {};
+  const shoppingOras = asArray(shoppingPayloadRecord.oras);
+  const fallbackOra = readString(shoppingOras[0]) ?? "";
+  const ora = (candidate.airlineDesigCode || fallbackOra).trim().toUpperCase();
+  if (!ora) {
+    throw new Error("Impossible de determiner la compagnie (ora) pour orderCreateRQ.");
+  }
+
+  const offerId = readFirstString(offerPriceValue.OfferID, candidate.offerId);
+  if (!offerId) {
+    throw new Error("OfferID manquant pour orderCreateRQ.");
+  }
+
+  const orderCreateOfferIdList = candidate.offerIdList.map((item) => ({
+    OfferItemRefID: item.OfferItemRefID,
+    PaxRefID: structuredClone(item.PaxRefID),
+  }));
+
+  const paxs = asArray(shoppingPayloadRecord.paxs).map((pax, paxIndex) =>
+    normalizeOrderCreatePax(pax, ora, paxIndex)
+  );
+  const agenceInfo = isRecord(shoppingPayloadRecord.agenceInfo)
+    ? structuredClone(shoppingPayloadRecord.agenceInfo)
+    : {};
+
+  const payload: Record<string, unknown> = {
+    circuitData: {},
+    onlineMarkup: {
+      TYPE: "EUROS",
+      VALUE: 0,
+    },
+    ora,
+    reasons: [],
+    paxs,
+    OfferIdList: orderCreateOfferIdList,
+    OfferID: offerId,
+    payment: {
+      paymentMethod: "Cash",
+    },
+    period: buildOrderCreatePeriods(offerPriceValue),
+    agenceInfo,
+    accessibilityServices: [],
+    responseId:
+      readFirstString(offerPriceValue.ResponseID, offerPriceValue.responseId, candidate.responseId) ?? "",
+  };
+
+  const serviceOfferId = readFirstString(offerPriceValue.serviceOfferId, offerPriceValue.ServiceOfferId);
+  if (serviceOfferId) {
+    payload.serviceOfferId = serviceOfferId;
   }
 
   return payload;
@@ -342,27 +635,136 @@ function formatMoney(amount: number | null, currency?: string): string {
   return normalizedCurrency ? `${amount.toFixed(2)} ${normalizedCurrency}` : `${amount.toFixed(2)}`;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? value : undefined;
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function readFirstNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    const parsed = readNumber(value);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function readFirstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    const parsed = readString(value);
+    if (parsed) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function extractOfferPriceValue(response: Record<string, unknown>): Record<string, unknown> {
+  const responseValue = asRecord(response.value);
+  if (responseValue) {
+    return responseValue;
+  }
+
+  const dataValue = asRecord(response.data);
+  if (dataValue) {
+    return dataValue;
+  }
+
+  const offerPriceValue = asRecord(response.OfferPriceRS) ?? asRecord(response.offerPriceRS);
+  if (offerPriceValue) {
+    return offerPriceValue;
+  }
+
+  return response;
+}
+
+function buildBaggageDetails(baggage: Record<string, unknown>): string {
+  const directDescription = readFirstString(baggage.descriptif, baggage.description, baggage.Details);
+  if (directDescription) {
+    return directDescription;
+  }
+
+  const weightAllowance = asRecord(asArray(baggage.WeightAllowance)[0]);
+  const maximumWeightMeasure = asRecord(weightAllowance?.MaximumWeightMeasure);
+  const maximumWeight = readFirstNumber(maximumWeightMeasure?.MaximumWeight, maximumWeightMeasure?.Value);
+  const weightUnit = readFirstString(maximumWeightMeasure?.UnitCode, maximumWeightMeasure?.Unit);
+
+  const dimensionAllowance = asRecord(asArray(baggage.DimensionAllowance)[0]);
+  const maxMeasure = readFirstNumber(dimensionAllowance?.MaxMeasure, dimensionAllowance?.MaximumValue);
+  const dimensionUnit = readFirstString(dimensionAllowance?.UnitCode, dimensionAllowance?.Unit);
+  const dimensionCategory = readFirstString(dimensionAllowance?.BaggageDimensionCategory);
+
+  const parts: string[] = [];
+  if (maximumWeight !== null) {
+    parts.push(`${maximumWeight}${weightUnit ? ` ${weightUnit}` : ""}`);
+  }
+  if (maxMeasure !== null) {
+    const categoryLabel = dimensionCategory ? `${dimensionCategory} ` : "";
+    parts.push(`${categoryLabel}${maxMeasure}${dimensionUnit ? ` ${dimensionUnit}` : ""}`.trim());
+  }
+
+  return parts.join(" - ");
+}
+
 function displayOfferPriceInfo(response: unknown) {
   if (!isRecord(response)) {
     console.log("Reponse offerPrice non exploitable.");
     return;
   }
 
-  const value = isRecord(response.value) ? response.value : {};
-  const offerId = readString(value.OfferID) ?? "N/A";
-  const responseId = readString(value.ResponseID) ?? "N/A";
+  const value = extractOfferPriceValue(response);
+  const offerId = readFirstString(value.OfferID, value.offerId, value.id) ?? "N/A";
+  const responseId =
+    readFirstString(value.ResponseID, value.responseId, value.reponseId, response.ResponseID, response.responseId) ??
+    "N/A";
   const offerExpirationDateTime = formatDateTime(value.OfferExpirationDateTime);
   const paymentTimeLimitDateTime = formatDateTime(value.PaymentTimeLimitDateTime);
 
-  const orderItems = Array.isArray(value.OrderItems) ? value.OrderItems : [];
-  const firstOrderItem = isRecord(orderItems[0]) ? orderItems[0] : {};
-  const priceNode = isRecord(firstOrderItem.Price) ? firstOrderItem.Price : {};
-  const totalAmount = readNumber(priceNode.TotalAmount);
-  const totalTaxAmount = readNumber(priceNode.TotalTaxAmount);
-  const taxRows = Array.isArray(priceNode.Taxes) ? priceNode.Taxes : [];
-  const firstTax = isRecord(taxRows[0]) ? taxRows[0] : {};
-  const firstTaxAmount = isRecord(firstTax.Amount) ? firstTax.Amount : {};
-  const currency = readString(firstTaxAmount.currency);
+  const orderItems = asArray(value.OrderItems);
+  const firstOrderItem = asRecord(orderItems[0]) ?? {};
+  const priceNode = asRecord(firstOrderItem.Price) ?? {};
+  const lowerPriceNode = asRecord(firstOrderItem.price) ?? {};
+  const farePriceType = asRecord(firstOrderItem.FarePriceType) ?? {};
+  const farePriceTypePrice = asRecord(farePriceType.Price) ?? {};
+  const farePriceTotalAmount = asRecord(farePriceTypePrice.TotalAmount) ?? {};
+  const farePriceTaxes = asRecord(farePriceTypePrice.Taxs) ?? {};
+
+  const totalAmount = readFirstNumber(
+    priceNode.TotalAmount,
+    asRecord(priceNode.Amount)?.Amount,
+    lowerPriceNode.TotalAmount,
+    asRecord(lowerPriceNode.Amount)?.Amount,
+    farePriceTotalAmount.price,
+    value.totalPrice,
+    value.TotalPrice
+  );
+
+  const totalTaxAmount = readFirstNumber(
+    priceNode.TotalTaxAmount,
+    lowerPriceNode.TotalTaxAmount,
+    farePriceTaxes.TotalTaxAmount
+  );
+
+  const taxRows = [
+    ...asArray(priceNode.Taxes),
+    ...asArray(lowerPriceNode.Taxes),
+    ...asArray(firstOrderItem.Taxes),
+  ];
+
+  const firstTax = asRecord(taxRows[0]) ?? {};
+  const firstTaxAmount = asRecord(firstTax.Amount) ?? {};
+  const currency =
+    readFirstString(
+      value.conditionCurrency,
+      asRecord(priceNode.Amount)?.Currency,
+      asRecord(lowerPriceNode.Amount)?.Currency,
+      firstTaxAmount.currency,
+      firstTaxAmount.Currency
+    ) ?? "";
 
   console.log("");
   console.log("===== Offer Price =====");
@@ -373,8 +775,8 @@ function displayOfferPriceInfo(response: unknown) {
   console.log(`Prix total: ${formatMoney(totalAmount, currency)}`);
   console.log(`Taxes total: ${formatMoney(totalTaxAmount, currency)}`);
 
-  const dataLists = isRecord(value.DataLists) ? value.DataLists : {};
-  const paxSegments = Array.isArray(dataLists.PaxSegmentList) ? dataLists.PaxSegmentList : [];
+  const dataLists = asRecord(value.DataLists) ?? {};
+  const paxSegments = [...asArray(dataLists.PaxSegmentList), ...asArray(dataLists.PaxSegment)];
   if (paxSegments.length > 0) {
     const segmentsTable = new Table({
       head: ["#", "Vol", "Dep", "Arr", "Cabin"],
@@ -410,7 +812,11 @@ function displayOfferPriceInfo(response: unknown) {
     console.log(segmentsTable.toString());
   }
 
-  const baggageList = Array.isArray(value.baggage) ? value.baggage : [];
+  const baggageList = [
+    ...asArray(value.baggage),
+    ...asArray(dataLists.BaggageAllowanceList),
+    ...asArray(dataLists.BaggageAllowance),
+  ];
   if (baggageList.length > 0) {
     const baggageTable = new Table({
       head: ["Type", "Qt", "Details"],
@@ -418,13 +824,13 @@ function displayOfferPriceInfo(response: unknown) {
     });
 
     baggageList.forEach((baggage) => {
-      const bag = isRecord(baggage) ? baggage : {};
-      const pieceAllowance = isRecord(bag.PieceAllowance) ? bag.PieceAllowance : {};
+      const bag = asRecord(baggage) ?? {};
+      const pieceAllowance = asRecord(bag.PieceAllowance) ?? {};
       const qty = readNumber(pieceAllowance.TotalQty);
       baggageTable.push([
-        readString(bag.TypeCode) ?? "N/A",
+        readFirstString(bag.TypeCode, bag.BaggageType, bag.BaggageCategory) ?? "N/A",
         qty === null ? "N/A" : String(qty),
-        readString(bag.descriptif) ?? "",
+        buildBaggageDetails(bag),
       ]);
     });
 
@@ -433,10 +839,16 @@ function displayOfferPriceInfo(response: unknown) {
     console.log(baggageTable.toString());
   }
 
-  const paymentInfo = Array.isArray(value.PaymentInfo) ? value.PaymentInfo : [];
+  const paymentInfo = asArray(value.PaymentInfo);
   if (paymentInfo.length > 0) {
     const paymentLabels = paymentInfo
-      .map((entry) => (isRecord(entry) ? readString(entry.Payment) : undefined))
+      .map((entry) => {
+        const paymentRecord = asRecord(entry);
+        if (paymentRecord) {
+          return readFirstString(paymentRecord.Payment, paymentRecord.payment, paymentRecord.Label);
+        }
+        return readString(entry);
+      })
       .filter((entry): entry is string => Boolean(entry));
     const displayed = paymentLabels.slice(0, 5);
     const suffix = paymentLabels.length > 5 ? ` (+${paymentLabels.length - 5})` : "";
@@ -444,19 +856,27 @@ function displayOfferPriceInfo(response: unknown) {
     console.log(`Paiements: ${displayed.join(", ")}${suffix}`);
   }
 
-  const fareRows = Array.isArray(firstOrderItem.Fare) ? firstOrderItem.Fare : [];
+  const fareRows = orderItems.flatMap((orderItem) => {
+    const item = asRecord(orderItem) ?? {};
+    return [...asArray(item.Fare), ...asArray(item.fare)];
+  });
   const penalties: Array<{ typeCode: string; appCode: string; detail: string }> = [];
   const seenPenalty = new Set<string>();
   for (const fare of fareRows) {
-    if (!isRecord(fare)) continue;
-    const fareRule = isRecord(fare.FareRule) ? fare.FareRule : {};
-    const penaltyRows = Array.isArray(fareRule.Penalty) ? fareRule.Penalty : [];
+    const fareRecord = asRecord(fare);
+    if (!fareRecord) continue;
+    const fareRule = asRecord(fareRecord.FareRule) ?? asRecord(fareRecord.fareRule) ?? {};
+    const penaltyRows = [...asArray(fareRule.Penalty), ...asArray(fareRule.penalties)];
     for (const penalty of penaltyRows) {
-      if (!isRecord(penalty)) continue;
-      const typeCode = readString(penalty.TypeCode) ?? "N/A";
-      const appCode = readString(penalty.AppCode) ?? "N/A";
-      const penaltyAmount = readNumber(penalty.PenaltyAmount);
-      const detail = penaltyAmount !== null ? formatMoney(penaltyAmount, currency) : (readString(penalty.DescText) ?? "NAV");
+      const penaltyRecord = asRecord(penalty);
+      if (!penaltyRecord) continue;
+      const typeCode = readFirstString(penaltyRecord.TypeCode, penaltyRecord.typeCode) ?? "N/A";
+      const appCode = readFirstString(penaltyRecord.AppCode, penaltyRecord.appCode) ?? "N/A";
+      const penaltyAmount = readFirstNumber(penaltyRecord.PenaltyAmount, penaltyRecord.amount);
+      const detail =
+        penaltyAmount !== null
+          ? formatMoney(penaltyAmount, currency)
+          : (readFirstString(penaltyRecord.DescText, penaltyRecord.description) ?? "NAV");
       const dedupeKey = `${typeCode}-${appCode}-${detail}`;
       if (seenPenalty.has(dedupeKey)) {
         continue;
@@ -1161,6 +1581,7 @@ async function runRemoteInteractive() {
         }
 
         let currentOffer: OfferSummaryRow | null = paginationAction.offer;
+        let currentOrderCreatePayload: Record<string, unknown> | null = null;
         while (currentOffer && continueSearch) {
           const offerPriceCandidate = result.offerPriceCandidates[currentOffer.offerId];
           if (!offerPriceCandidate) {
@@ -1191,7 +1612,19 @@ async function runRemoteInteractive() {
             console.log(`OfferPrice response message: ${offerPriceResult.message}`);
             console.log(`OfferPrice output written to: ${offerPriceResult.outputDir}`);
             displayOfferPriceInfo(offerPriceResult.response);
+
+            try {
+              currentOrderCreatePayload = buildOrderCreateRequestPayload(
+                offerPriceCandidate,
+                payloadUpdate.payload,
+                offerPriceResult.response
+              );
+            } catch (buildError) {
+              currentOrderCreatePayload = null;
+              console.error("Impossible de preparer orderCreateRQ:", buildError);
+            }
           } catch (error) {
+            currentOrderCreatePayload = null;
             console.error("Erreur offerPriceRQ:", error);
           }
 
@@ -1202,6 +1635,7 @@ async function runRemoteInteractive() {
               message: "Que souhaitez-vous faire ?",
               choices: [
                 { title: "Choisir offre retour", value: "return" },
+                { title: "Lancer orderCreateRQ", value: "orderCreate" },
                 { title: "Choisir une autre offre", value: "select" },
                 { title: "Nouvelle recherche", value: "search" },
                 { title: "Quitter", value: "exit" },
@@ -1220,7 +1654,55 @@ async function runRemoteInteractive() {
             const pickedReturnOffer = await pickReturnOffer(remoteOffers, currentOffer);
             if (pickedReturnOffer) {
               currentOffer = pickedReturnOffer;
+              currentOrderCreatePayload = null;
               continue;
+            }
+            continue;
+          }
+
+          if (nextAction.action === "orderCreate") {
+            if (!currentOrderCreatePayload) {
+              console.error("orderCreateRQ indisponible: lancer offerPrice avec succes d'abord.");
+              continue;
+            }
+
+            try {
+              const orderCreateOra = readString(currentOrderCreatePayload.ora) ?? "IB";
+              const orderCreateResult = await runRemoteOrderCreate({
+                payload: currentOrderCreatePayload,
+                url: buildOrderCreateUrl(orderCreateOra),
+                requestHeaders: {
+                  authorization: bearerToken,
+                },
+              });
+
+              console.log(`OrderCreate response message: ${orderCreateResult.message}`);
+              console.log(`OrderCreate output written to: ${orderCreateResult.outputDir}`);
+
+              const folderId = extractFolderIdFromOrderCreateResponse(orderCreateResult.response);
+              if (!folderId) {
+                console.warn("folderId absent de orderCreateRS, appel dossier opti ignore.");
+                continue;
+              }
+
+              try {
+                const encryptedFolderId = encrypteDossierId(folderId);
+                const dossierOptiResult = await runRemoteDossierOpti({
+                  folderId,
+                  encryptedFolderId,
+                  requestHeaders: {
+                    authorization: bearerToken,
+                  },
+                });
+
+                console.log(`Dossier opti response message: ${dossierOptiResult.message}`);
+                console.log(`Dossier opti output written to: ${dossierOptiResult.outputDir}`);
+                console.log(`Dossier opti request URL: ${dossierOptiResult.url}`);
+              } catch (error) {
+                console.error("Erreur dossier opti:", error);
+              }
+            } catch (error) {
+              console.error("Erreur orderCreateRQ:", error);
             }
             continue;
           }

@@ -1,7 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { DEFAULT_AERIAL_BASE_URL } from "../utils/baseUrl";
 
-export const DEFAULT_REMOTE_OFFER_PRICE_URL = "http://localhost:3000/aerial/global/offerPriceRQ";
+export const DEFAULT_REMOTE_OFFER_PRICE_URL = `${DEFAULT_AERIAL_BASE_URL}/global/offerPriceRQ`;
 
 export interface RemoteOfferPriceOptions {
   payload: unknown;
@@ -23,6 +24,38 @@ function readString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function sanitizeHeaders(headers: Record<string, string>): Record<string, string> {
+  const sanitized: Record<string, string> = { ...headers };
+  if (sanitized.authorization) {
+    sanitized.authorization = "<redacted>";
+  }
+  return sanitized;
+}
+
+function extractOfferPriceMessage(response: unknown): string {
+  if (!isRecord(response)) {
+    return "N/A";
+  }
+
+  const rootMessage = readString(response.message);
+  if (rootMessage) {
+    return rootMessage;
+  }
+
+  const value = isRecord(response.value) ? response.value : undefined;
+  const nestedMessage = readString(value?.message);
+  if (nestedMessage) {
+    return nestedMessage;
+  }
+
+  const status = readString(response.status) ?? readString(value?.status);
+  if (status) {
+    return status;
+  }
+
+  return "N/A";
+}
+
 function getOutputFolderName() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
@@ -42,11 +75,26 @@ export async function runRemoteOfferPrice(
     "content-type": "application/json",
     ...(options.requestHeaders ?? {}),
   };
+  const payloadJson = JSON.stringify(options.payload);
+
+  console.log(
+    "offerPriceRQ debug:",
+    JSON.stringify(
+      {
+        method: "POST",
+        url,
+        headers: sanitizeHeaders(requestHeaders),
+        payloadBytes: Buffer.byteLength(payloadJson, "utf8"),
+      },
+      null,
+      2
+    )
+  );
 
   const httpResponse = await fetch(url, {
     method: "POST",
     headers: requestHeaders,
-    body: JSON.stringify(options.payload),
+    body: payloadJson,
   });
 
   const responseText = await httpResponse.text();
@@ -69,6 +117,6 @@ export async function runRemoteOfferPrice(
     );
   }
 
-  const message = isRecord(parsedResponse) ? readString(parsedResponse.message) ?? "N/A" : "N/A";
+  const message = extractOfferPriceMessage(parsedResponse);
   return { message, outputDir, response: parsedResponse };
 }

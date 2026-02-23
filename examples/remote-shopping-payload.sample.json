@@ -9,19 +9,37 @@
   "shoppingCriteria": {
     "includeUpsell": true,
     "cabinTypes": {},
-    "cabinType": ["ECONOMY", "PREMIUM", "BUSINESS", "FIRST"],
+    "cabinType": [
+      "ECONOMY",
+      "PREMIUM",
+      "BUSINESS",
+      "FIRST"
+    ],
     "fareType": []
   },
   "selectedAirline": [],
-  "oras": ["BA"],
+  "oras": [
+    "BA",
+    "IB"
+  ],
   "flights": [
     {
-      "dates": ["2026-04-15", "2026-04-22"],
+      "dates": [
+        "2026-04-15",
+        "2026-04-22"
+      ],
       "locationCodeDep": "LON",
       "locationCodeArv": "PAR",
       "times": [],
-      "depCity": ["LHR", "LGW", "LCY"],
-      "arvCity": ["CDG", "ORY"]
+      "depCity": [
+        "LHR",
+        "LGW",
+        "LCY"
+      ],
+      "arvCity": [
+        "CDG",
+        "ORY"
+      ]
     }
   ],
   "agenceInfo": {

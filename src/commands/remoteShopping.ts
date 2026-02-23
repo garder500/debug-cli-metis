@@ -2,8 +2,9 @@ import Table from "cli-table3";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readJsonFile } from "../utils/fileReader";
+import { DEFAULT_AERIAL_BASE_URL } from "../utils/baseUrl";
 
-export const DEFAULT_REMOTE_SHOPPING_URL = "http://localhost:3000/aerial/global/airShoppingRQ";
+export const DEFAULT_REMOTE_SHOPPING_URL = `${DEFAULT_AERIAL_BASE_URL}/global/airShoppingRQ`;
 
 export interface RemoteShoppingOptions {
   payloadFile: string;
@@ -34,11 +35,10 @@ export interface OfferSummaryRow {
   baggage: string;
 }
 
-export interface OfferIdListItem {
-  FareTypeCode?: string;
+export type OfferIdListItem = Record<string, unknown> & {
   OfferItemRefID: string;
   PaxRefID: string[];
-}
+};
 
 export interface OfferPriceCandidate {
   offerId: string;
@@ -61,6 +61,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function sanitizeHeaders(headers: Record<string, string>): Record<string, string> {
+  const sanitized: Record<string, string> = { ...headers };
+  if (sanitized.authorization) {
+    sanitized.authorization = "<redacted>";
+  }
+  return sanitized;
 }
 
 function readNumber(value: unknown): number | null {
@@ -95,16 +103,19 @@ function parseOfferIdListItem(value: unknown): OfferIdListItem | null {
     return null;
   }
 
-  const fareTypeCode = readString(value.FareTypeCode);
   const paxRefId = readStringArray(value.PaxRefID);
+  const clonedItem = structuredClone(value) as Record<string, unknown>;
   return {
+    ...clonedItem,
     OfferItemRefID: offerItemRefId,
     PaxRefID: paxRefId,
-    ...(fareTypeCode ? { FareTypeCode: fareTypeCode } : {}),
   };
 }
 
-function buildOfferPriceCandidate(offer: Record<string, unknown>): OfferPriceCandidate | null {
+function buildOfferPriceCandidate(
+  offer: Record<string, unknown>,
+  defaultResponseId?: string
+): OfferPriceCandidate | null {
   const offerId = readString(offer.OfferID);
   if (!offerId) {
     return null;
@@ -115,7 +126,11 @@ function buildOfferPriceCandidate(offer: Record<string, unknown>): OfferPriceCan
   const offerIdList = offerIdListRaw
     .map((item) => parseOfferIdListItem(item))
     .filter((item): item is OfferIdListItem => item !== null);
-  const responseId = readString(offer.responseId) ?? readString(offer.reponseId);
+  const responseId =
+    readString(offer.responseId) ??
+    readString(offer.reponseId) ??
+    readString(offer.ResponseID) ??
+    defaultResponseId;
   const totalPrice = isRecord(offer.TotalPrice) ? structuredClone(offer.TotalPrice) : undefined;
 
   return {
@@ -211,6 +226,11 @@ function collectOfferRows(response: AirShoppingResponse): {
   offerPriceCandidates: Record<string, OfferPriceCandidate>;
 } {
   const value = response.value;
+  const responseRecord = isRecord(value) ? value : {};
+  const defaultResponseId =
+    readString(responseRecord.responseId) ??
+    readString(responseRecord.reponseId) ??
+    readString(responseRecord.ResponseID);
   const originList = Array.isArray(value?.OriginListFlights) ? value?.OriginListFlights : [];
   const { journeyById, bagById } = buildLookupMaps(response);
   const offersById = new Map<string, OfferSummaryRow>();
@@ -257,7 +277,7 @@ function collectOfferRows(response: AirShoppingResponse): {
           cabinType,
           baggage,
         };
-        const offerPriceCandidate = buildOfferPriceCandidate(offer);
+        const offerPriceCandidate = buildOfferPriceCandidate(offer, defaultResponseId);
 
         const existing = offersById.get(offerId);
         if (!existing) {
@@ -339,11 +359,27 @@ export async function runRemoteShopping(
     "content-type": "application/json",
     ...(options.requestHeaders ?? {}),
   };
+  const payloadJson = JSON.stringify(payload);
+
+  console.log(
+    "airShoppingRQ debug:",
+    JSON.stringify(
+      {
+        method: "POST",
+        url,
+        headers: sanitizeHeaders(requestHeaders),
+        payloadBytes: Buffer.byteLength(payloadJson, "utf8"),
+        payloadSource: options.payloadOverride ? "override" : options.payloadFile,
+      },
+      null,
+      2
+    )
+  );
 
   const httpResponse = await fetch(url, {
     method: "POST",
     headers: requestHeaders,
-    body: JSON.stringify(payload),
+    body: payloadJson,
   });
 
   const responseText = await httpResponse.text();
