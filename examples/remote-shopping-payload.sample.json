@@ -1,0 +1,52 @@
+{
+  "option": {
+    "directFlight": false,
+    "refundable": false,
+    "modifiable": false,
+    "lowest": false,
+    "strictSearch": false
+  },
+  "shoppingCriteria": {
+    "includeUpsell": true,
+    "cabinTypes": {},
+    "cabinType": ["ECONOMY", "PREMIUM", "BUSINESS", "FIRST"],
+    "fareType": []
+  },
+  "selectedAirline": [],
+  "oras": ["BA"],
+  "flights": [
+    {
+      "dates": ["2026-04-15", "2026-04-22"],
+      "locationCodeDep": "LON",
+      "locationCodeArv": "PAR",
+      "times": [],
+      "depCity": ["LHR", "LGW", "LCY"],
+      "arvCity": ["CDG", "ORY"]
+    }
+  ],
+  "agenceInfo": {
+    "aggregatorSurcharge": false,
+    "gie": "Tourcom",
+    "id_sales_point": 1,
+    "id_agence": 1,
+    "name": "AdenisPDV",
+    "iata": "20255373",
+    "office_id": "REPLACE_WITH_ENCRYPTED_OFFICE_ID",
+    "phone": "0606060609",
+    "BA-key": "REPLACE_WITH_ENCRYPTED_BA_KEY"
+  },
+  "paxs": [
+    {
+      "__index": 0,
+      "id": "PAX1",
+      "ptc": "ADT",
+      "individualInfo": {
+        "titleName": "MR",
+        "surname": "DOE",
+        "givenName": "JOHN",
+        "birthdate": "1990-01-01",
+        "entreprise": "Example Corp"
+      }
+    }
+  ]
+}
