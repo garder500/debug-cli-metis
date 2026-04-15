@@ -1501,13 +1501,13 @@ async function runInteractive() {
       break;
     }
 
-    lastFile = answers.file;
+    lastFile = answers.file.trim().replace(/^["']|["']$/g, "");
     lastFlight = answers.flight || "";
     lastBrand = answers.brand || "";
     lastSort = answers.sort || "";
 
     try {
-      const { offers, maps, groupedItineraryResponse } = await collectSabreOffers(answers.file, {
+      const { offers, maps, groupedItineraryResponse } = await collectSabreOffers(lastFile, {
         flightFilter: answers.flight || undefined,
         brandFilter: answers.brand || undefined,
         sortBy: answers.sort || undefined,
