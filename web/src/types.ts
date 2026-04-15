@@ -52,4 +52,35 @@ export interface FilterState {
     sort: string;
 }
 
+export interface OfferPriceCondition {
+    title: string;
+    available: boolean;
+    date: string;
+    price: string | null;
+    change: boolean | null;
+    cancel: boolean | null;
+}
+
+export interface OfferPriceData {
+    offerId: string;
+    offerExpiration: string | null;
+    paymentTimeLimit: string | null;
+    conditions: OfferPriceCondition[];
+    conditionCurrency: string;
+    remarks: string[];
+    paymentMethods: string[];
+    orderItems: {
+        paxRefId: string[];
+        offerItemId: string;
+        totalAmount: number;
+        totalTaxAmount: number;
+    }[];
+    baggage: {
+        id: string;
+        type: string;
+        pieces: number;
+        weights: string[];
+    }[];
+}
+
 export type PayloadMode = "sabre" | "metis";

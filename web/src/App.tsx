@@ -2,9 +2,8 @@ import { useState } from "react";
 import { FileUpload } from "@/components/FileUpload";
 import { MetisSearchForm } from "@/components/MetisSearchForm";
 import { OffersTable } from "@/components/OffersTable";
-import { OfferDetail } from "@/components/OfferDetail";
 import { Filters } from "@/components/Filters";
-import type { Offer, OfferDetailData, FilterState, PayloadMode } from "@/types";
+import type { Offer, OfferDetailData, FilterState, PayloadMode, OfferPriceData } from "@/types";
 
 function ModeSelector({ onSelect }: { onSelect: (m: PayloadMode) => void }) {
   return (
@@ -61,6 +60,8 @@ function App() {
     sort: "",
   });
   const [metisTab, setMetisTab] = useState<"search" | "upload">("search");
+  const [offerPriceData, setOfferPriceData] = useState<OfferPriceData | null>(null);
+  const [offerPriceLoading, setOfferPriceLoading] = useState(false);
 
   const resetState = () => {
     setOffers([]);
@@ -68,6 +69,7 @@ function App() {
     setSelectedOffer(null);
     setFileUploaded(false);
     setFilters({ flight: "", cabin: "", brand: "", sort: "" });
+    setOfferPriceData(null);
   };
 
   const handleModeSelect = (m: PayloadMode) => {
@@ -78,6 +80,7 @@ function App() {
   const handleFileUploaded = async () => {
     setFileUploaded(true);
     setSelectedOffer(null);
+    setOfferPriceData(null);
     await fetchOffers(filters);
   };
 
@@ -106,12 +109,41 @@ function App() {
 
   const handleSelectOffer = async (offerId: string) => {
     if (!mode) return;
+    // Toggle: re-click same offer to close
+    if (selectedOffer?.offerId === offerId) {
+      setSelectedOffer(null);
+      setOfferPriceData(null);
+      return;
+    }
+    setOfferPriceData(null);
     const res = await fetch(
       `/api/${mode}/offers/${encodeURIComponent(offerId)}`
     );
     if (res.ok) {
       const data = await res.json();
       setSelectedOffer(data);
+    }
+  };
+
+  const handleOfferPrice = async (offerId: string) => {
+    setOfferPriceLoading(true);
+    setOfferPriceData(null);
+    try {
+      const res = await fetch(
+        `/api/metis/offerPrice/${encodeURIComponent(offerId)}`,
+        { method: "POST" }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setOfferPriceData(data);
+      } else {
+        const err = await res.json().catch(() => ({ error: "Unknown error" }));
+        alert(`OfferPrice error: ${err.error}`);
+      }
+    } catch (e: unknown) {
+      alert(`OfferPrice failed: ${e instanceof Error ? e.message : "Unknown error"}`);
+    } finally {
+      setOfferPriceLoading(false);
     }
   };
 
@@ -190,12 +222,14 @@ function App() {
                     offers={offers}
                     onSelectOffer={handleSelectOffer}
                     selectedOfferId={selectedOffer?.offerId}
-                  />
-                )}
-                {selectedOffer && (
-                  <OfferDetail
-                    detail={selectedOffer}
-                    onClose={() => setSelectedOffer(null)}
+                    selectedOfferDetail={selectedOffer}
+                    onCloseDetail={() => {
+                      setSelectedOffer(null);
+                      setOfferPriceData(null);
+                    }}
+                    onOfferPrice={mode === "metis" ? handleOfferPrice : undefined}
+                    offerPriceData={offerPriceData}
+                    offerPriceLoading={offerPriceLoading}
                   />
                 )}
               </>

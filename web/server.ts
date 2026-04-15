@@ -521,6 +521,7 @@ function parseDuration(iso: string): string {
 
 let lastMetisContent: MetisRoot | null = null;
 let metisOfferIndex: Map<string, { od: MetisRoot["value"]["OriginListFlights"][0]; flight: MetisRoot["value"]["OriginListFlights"][0]["flights"][0]; offer: MetisOffer }> = new Map();
+let lastSearchPayload: any = null;
 
 function buildMetisLookups(data: MetisRoot) {
     const dl = data.value.DataLists;
@@ -929,9 +930,28 @@ async function getMetisToken(): Promise<string> {
 }
 
 // Metis Shopping - Reverse proxy to fetch live flights
+const DEFAULT_AGENCE_INFO = {
+    aggregatorSurcharge: false,
+    gie: "Tourcom",
+    id_sales_point: 1,
+    id_agence: 1,
+    name: "AdenisPDV",
+    iata: "20255373",
+    office_id: "",
+    phone: "0606060609",
+};
+
 app.post("/api/metis/search", async (c) => {
     try {
         const payload = await c.req.json();
+
+        // Inject agenceInfo if not provided
+        if (!payload.agenceInfo) {
+            payload.agenceInfo = { ...DEFAULT_AGENCE_INFO };
+        }
+
+        // Store search payload for OfferPrice reuse
+        lastSearchPayload = payload;
 
         // 1. Get bearer token
         let token: string;
@@ -970,11 +990,11 @@ app.post("/api/metis/search", async (c) => {
         const hasOriginList = !!content.value?.OriginListFlights;
         const originListLen = content.value?.OriginListFlights?.length ?? 0;
         const hasOffersPrices = !!content.value?.offersPrices;
-        const offersPricesLen = content.value?.offersPrices?.length ?? 0;
+        const offersPricesKeys = content.value?.offersPrices ? Object.keys(content.value.offersPrices).length : 0;
         const hasDataLists = !!content.value?.DataLists;
         console.log(`[Search] Response keys: ${topKeys.join(", ")}`);
         console.log(`[Search] value keys: ${valueKeys.join(", ")}`);
-        console.log(`[Search] OriginListFlights: ${hasOriginList} (${originListLen}), offersPrices: ${hasOffersPrices} (${offersPricesLen}), DataLists: ${hasDataLists}`);
+        console.log(`[Search] OriginListFlights: ${hasOriginList} (${originListLen}), offersPrices: ${hasOffersPrices} (${offersPricesKeys} keys), DataLists: ${hasDataLists}`);
 
         if (!content.value?.OriginListFlights) {
             return c.json({ error: "Invalid response from Metis API: missing value.OriginListFlights" }, 502);
@@ -985,6 +1005,213 @@ app.post("/api/metis/search", async (c) => {
         return c.json({ success: true, message: "Search completed successfully" });
     } catch (err: any) {
         return c.json({ error: `Failed to reach Metis API: ${err.message}` }, 502);
+    }
+});
+
+// ============================================================
+// Metis OfferPrice
+// ============================================================
+
+app.post("/api/metis/offerPrice/:offerId", async (c) => {
+    const offerId = decodeURIComponent(c.req.param("offerId"));
+
+    if (!lastMetisContent) {
+        return c.json({ error: "No shopping data available" }, 400);
+    }
+
+    const entry = metisOfferIndex.get(offerId);
+    if (!entry) {
+        return c.json({ error: `Offer ${offerId} not found` }, 404);
+    }
+
+    const { offer } = entry;
+    const { segmentMap, journeyMap, priceClassMap } = buildMetisLookups(lastMetisContent);
+    const paxList = lastMetisContent.value.DataLists.Pax;
+
+    // Build OfferID array from OfferIdList
+    const offerItemIds = offer.OfferIdList.map((item) => item.OfferItemRefID);
+
+    // Fare basis from PriceClass
+    const pc = offer.PriceClassRefID ? priceClassMap.get(offer.PriceClassRefID) : undefined;
+
+    // Determine journeys and one-way status
+    const linkedJourneys = offer.PaxJourneyRefLinked || [offer.PaxJourneyRefID];
+    const isOneWay = linkedJourneys.length <= 1;
+
+    // Build fares from segments across all journeys
+    const fares: {
+        flightNumber: number;
+        airlineCode: string;
+        fromAirportCode: string;
+        toAirportCode: string;
+        departureDate: string;
+        departureTime: string;
+        bookingClass: string;
+        arrivalDate: string;
+        arrivalTime: string;
+        flightStatusCode: string;
+        source: string;
+        isMarriageGroup: boolean;
+    }[] = [];
+
+    for (const jRef of linkedJourneys) {
+        const journey = journeyMap.get(jRef);
+        if (!journey) continue;
+        for (const sRef of journey.PaxSegmentRefID) {
+            const seg = segmentMap.get(sRef);
+            if (!seg) continue;
+            const depDt = seg.Dep.AircraftScheduledDateTime;
+            const arrDt = seg.Arrival.AircraftScheduledDateTime;
+            fares.push({
+                flightNumber: parseInt(seg.MarketingCarrierInfo.MarketingCarrierFlightNumberText) || 0,
+                airlineCode: cleanCarrierCode(seg.MarketingCarrierInfo.CarrierDesigCode),
+                fromAirportCode: seg.Dep.IATALocationCode,
+                toAirportCode: seg.Arrival.IATALocationCode,
+                departureDate: depDt.substring(0, 10),
+                departureTime: depDt.substring(11, 16),
+                bookingClass: "",
+                arrivalDate: arrDt.substring(0, 10),
+                arrivalTime: arrDt.substring(11, 16),
+                flightStatusCode: "NN",
+                source: "ATPCO",
+                isMarriageGroup: false,
+            });
+        }
+    }
+
+    // Build fareBasisCode per passenger
+    const fareBasisCodes = paxList.map((pax) => ({
+        fareBasis: pc?.FareBasisCode || "",
+        passengerType: pax.PTC,
+    }));
+
+    // Calculate timeToLive from offer expiration
+    const expiry = offer.OfferExpirationDateTime
+        ? new Date(offer.OfferExpirationDateTime).getTime()
+        : 0;
+    const timeToLive = expiry ? Math.max(0, Math.floor((expiry - Date.now()) / 1000)) : 1140;
+
+    // Base64-encode dataID
+    const dataID = btoa(
+        JSON.stringify({
+            orderId: { offerId: offer.OfferID, timeToLive, source: "NDC" },
+            offerItemId: offerItemIds,
+            fareBasisCode: fareBasisCodes,
+            isOneWay,
+            fares,
+        })
+    );
+
+    // Determine ORA source from OwnerCode
+    const ora =
+        offer.OwnerCode.startsWith("SABRE") || offer.OwnerCode.startsWith("SabreNDC")
+            ? "SABRE"
+            : cleanCarrierCode(offer.OwnerCode);
+
+    // Build paxs with minimal info
+    const paxs = paxList.map((p) => ({
+        PaxID: p.PaxID,
+        PTC: p.PTC,
+        _other: {},
+        docsList: [],
+        fidelityCard: null,
+    }));
+
+    const agenceInfo = lastSearchPayload?.agenceInfo || DEFAULT_AGENCE_INFO;
+
+    const offerPricePayload = {
+        oras: [ora],
+        OfferID: offerItemIds,
+        dataID,
+        AirlineDesigCode: ora,
+        paxs,
+        agenceInfo,
+    };
+
+    console.log(`[OfferPrice] Requesting for ${offerId}, ORA=${ora}, items=${offerItemIds.length}`);
+
+    // Get token and call API
+    let token: string;
+    try {
+        token = await getMetisToken();
+    } catch (err: any) {
+        return c.json({ error: `Authentication failed: ${err.message}` }, 401);
+    }
+
+    const targetUrl = "http://localhost:8080/global/offerPriceRQ";
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60_000);
+
+    try {
+        const response = await fetch(targetUrl, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+                "x-source-app": "CHECKOUT",
+            },
+            body: JSON.stringify(offerPricePayload),
+            signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            const text = await response.text();
+            return c.json(
+                { error: `OfferPrice API error (${response.status}): ${text}` },
+                response.status as any
+            );
+        }
+
+        const result = (await response.json()) as any;
+
+        // OfferPriceRS has nested value.value structure
+        const inner = result?.value?.value || result?.value || result;
+
+        // Extract unique payment method names
+        const paymentMethods: string[] = [];
+        for (const p of inner.PaymentInfo || []) {
+            if (p.Payment && !paymentMethods.includes(p.Payment)) {
+                paymentMethods.push(p.Payment);
+            }
+        }
+
+        // Extract baggage details (KG weights only)
+        const baggage = (inner.DataLists?.BaggageAllowanceList || []).map((ba: any) => ({
+            id: ba.BaggageAllowanceID || "",
+            type: ba.TypeCode || "",
+            pieces: ba.PieceAllowance?.TotalQty ?? 0,
+            weights: (ba.weight || [])
+                .filter((w: any) => w.MaximumWeightMeasure?.UnitCode === "KG")
+                .map((w: any) => `${w.MaximumWeightMeasure.MaximumWeight} kg`),
+        }));
+
+        // Build response
+        const offerPriceData = {
+            offerId: inner.OfferID || offerId,
+            offerExpiration: inner.OfferExpirationDateTime || null,
+            paymentTimeLimit: inner.PaymentTimeLimitDateTime || null,
+            conditions: inner.conditions || [],
+            conditionCurrency: inner.conditionCurrency || "",
+            remarks: inner.remarks || [],
+            paymentMethods,
+            orderItems: (inner.OrderItems || []).map((item: any) => ({
+                paxRefId: item.PaxRefID || [],
+                offerItemId: item.OfferItemID || "",
+                totalAmount: item.Price?.TotalAmount ?? 0,
+                totalTaxAmount: item.Price?.TotalTaxAmount ?? 0,
+            })),
+            baggage,
+        };
+
+        console.log(
+            `[OfferPrice] Success: ${offerPriceData.conditions.length} conditions, ${offerPriceData.remarks.length} remarks, ${offerPriceData.paymentMethods.length} payment methods`
+        );
+
+        return c.json(offerPriceData);
+    } catch (err: any) {
+        clearTimeout(timeoutId);
+        return c.json({ error: `Failed to reach OfferPrice API: ${err.message}` }, 502);
     }
 });
 
