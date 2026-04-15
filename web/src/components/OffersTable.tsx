@@ -46,6 +46,7 @@ export function OffersTable({
                             <TableHead>Offer ID</TableHead>
                             <TableHead>Prix</TableHead>
                             <TableHead>Compagnie</TableHead>
+                            <TableHead>Cabine</TableHead>
                             <TableHead>Brand</TableHead>
                             <TableHead>Départ</TableHead>
                             <TableHead>Route</TableHead>
@@ -56,8 +57,8 @@ export function OffersTable({
                             <TableRow
                                 key={offer.offerId}
                                 className={`cursor-pointer transition-colors ${selectedOfferId === offer.offerId
-                                        ? "bg-primary/10"
-                                        : "hover:bg-muted/50"
+                                    ? "bg-primary/10"
+                                    : "hover:bg-muted/50"
                                     }`}
                                 onClick={() => onSelectOffer(offer.offerId)}
                             >
@@ -72,6 +73,11 @@ export function OffersTable({
                                 </TableCell>
                                 <TableCell>
                                     <Badge variant="outline">{offer.company}</Badge>
+                                </TableCell>
+                                <TableCell>
+                                    {offer.cabin && (
+                                        <Badge variant="default">{offer.cabin}</Badge>
+                                    )}
                                 </TableCell>
                                 <TableCell>
                                     {offer.brand && (

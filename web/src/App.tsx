@@ -1,11 +1,52 @@
 import { useState } from "react";
 import { FileUpload } from "@/components/FileUpload";
+import { MetisSearchForm } from "@/components/MetisSearchForm";
 import { OffersTable } from "@/components/OffersTable";
 import { OfferDetail } from "@/components/OfferDetail";
 import { Filters } from "@/components/Filters";
-import type { Offer, OfferDetailData, FilterState } from "@/types";
+import type { Offer, OfferDetailData, FilterState, PayloadMode } from "@/types";
+
+function ModeSelector({ onSelect }: { onSelect: (m: PayloadMode) => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-24 space-y-8">
+      <h2 className="text-3xl font-bold tracking-tight">
+        Choisissez le type de payload
+      </h2>
+      <p className="text-muted-foreground">
+        Sélectionnez le format de réponse Shopping à inspecter
+      </p>
+      <div className="flex gap-6">
+        <button
+          onClick={() => onSelect("sabre")}
+          className="group rounded-xl border-2 border-muted p-8 w-64 text-center hover:border-primary hover:bg-primary/5 transition-all"
+        >
+          <div className="text-5xl mb-4">🛩️</div>
+          <h3 className="text-xl font-semibold group-hover:text-primary">
+            SABRE
+          </h3>
+          <p className="text-sm text-muted-foreground mt-2">
+            GDS Shopping Response
+          </p>
+        </button>
+        <button
+          onClick={() => onSelect("metis")}
+          className="group rounded-xl border-2 border-muted p-8 w-64 text-center hover:border-primary hover:bg-primary/5 transition-all"
+        >
+          <div className="text-5xl mb-4">✈️</div>
+          <h3 className="text-xl font-semibold group-hover:text-primary">
+            METIS
+          </h3>
+          <p className="text-sm text-muted-foreground mt-2">
+            NDC Shopping Response
+          </p>
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function App() {
+  const [mode, setMode] = useState<PayloadMode | null>(null);
   const [offers, setOffers] = useState<Offer[]>([]);
   const [totalOffers, setTotalOffers] = useState(0);
   const [selectedOffer, setSelectedOffer] = useState<OfferDetailData | null>(
@@ -15,9 +56,24 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [filters, setFilters] = useState<FilterState>({
     flight: "",
+    cabin: "",
     brand: "",
     sort: "",
   });
+  const [metisTab, setMetisTab] = useState<"search" | "upload">("search");
+
+  const resetState = () => {
+    setOffers([]);
+    setTotalOffers(0);
+    setSelectedOffer(null);
+    setFileUploaded(false);
+    setFilters({ flight: "", cabin: "", brand: "", sort: "" });
+  };
+
+  const handleModeSelect = (m: PayloadMode) => {
+    resetState();
+    setMode(m);
+  };
 
   const handleFileUploaded = async () => {
     setFileUploaded(true);
@@ -26,13 +82,15 @@ function App() {
   };
 
   const fetchOffers = async (f: FilterState) => {
+    if (!mode) return;
     setLoading(true);
     try {
       const params = new URLSearchParams();
       if (f.flight) params.set("flight", f.flight);
+      if (f.cabin) params.set("cabin", f.cabin);
       if (f.brand) params.set("brand", f.brand);
       if (f.sort) params.set("sort", f.sort);
-      const res = await fetch(`/api/sabre/offers?${params}`);
+      const res = await fetch(`/api/${mode}/offers?${params}`);
       const data = await res.json();
       setOffers(data.offers || []);
       setTotalOffers(data.total || 0);
@@ -47,8 +105,9 @@ function App() {
   };
 
   const handleSelectOffer = async (offerId: string) => {
+    if (!mode) return;
     const res = await fetch(
-      `/api/sabre/offers/${encodeURIComponent(offerId)}`
+      `/api/${mode}/offers/${encodeURIComponent(offerId)}`
     );
     if (res.ok) {
       const data = await res.json();
@@ -56,45 +115,90 @@ function App() {
     }
   };
 
+  const modeLabel = mode === "sabre" ? "SABRE Shopping" : "METIS NDC Shopping";
+
   return (
     <div className="min-h-screen bg-background">
       <header className="border-b bg-card">
-        <div className="container mx-auto px-6 py-4">
-          <h1 className="text-2xl font-bold tracking-tight">Metis</h1>
-          <p className="text-sm text-muted-foreground">
-            SABRE Shopping Debug
-          </p>
+        <div className="container mx-auto px-6 py-4 flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">Metis</h1>
+            <p className="text-sm text-muted-foreground">
+              {mode ? `${modeLabel} Debug` : "Shopping Debug"}
+            </p>
+          </div>
+          {mode && (
+            <button
+              onClick={() => {
+                resetState();
+                setMode(null);
+              }}
+              className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+            >
+              ← Changer de mode
+            </button>
+          )}
         </div>
       </header>
 
       <main className="container mx-auto px-6 py-6 space-y-6">
-        <FileUpload onUploaded={handleFileUploaded} />
-
-        {fileUploaded && (
+        {!mode ? (
+          <ModeSelector onSelect={handleModeSelect} />
+        ) : (
           <>
-            <Filters filters={filters} onChange={handleFiltersChange} />
-            <div className="flex items-center justify-between">
-              <p className="text-sm text-muted-foreground">
-                {totalOffers} offre{totalOffers !== 1 ? "s" : ""} trouvée
-                {totalOffers !== 1 ? "s" : ""}
-              </p>
-            </div>
-            {loading ? (
-              <div className="flex items-center justify-center py-12">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+            {mode === "metis" ? (
+              <div className="space-y-4">
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setMetisTab("search")}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${metisTab === "search" ? "bg-primary text-primary-foreground" : "bg-muted hover:bg-muted/80"}`}
+                  >
+                    🔍 Recherche live
+                  </button>
+                  <button
+                    onClick={() => setMetisTab("upload")}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${metisTab === "upload" ? "bg-primary text-primary-foreground" : "bg-muted hover:bg-muted/80"}`}
+                  >
+                    📁 Charger un fichier
+                  </button>
+                </div>
+                {metisTab === "search" ? (
+                  <MetisSearchForm onSearchComplete={handleFileUploaded} />
+                ) : (
+                  <FileUpload onUploaded={handleFileUploaded} mode={mode} />
+                )}
               </div>
             ) : (
-              <OffersTable
-                offers={offers}
-                onSelectOffer={handleSelectOffer}
-                selectedOfferId={selectedOffer?.offerId}
-              />
+              <FileUpload onUploaded={handleFileUploaded} mode={mode} />
             )}
-            {selectedOffer && (
-              <OfferDetail
-                detail={selectedOffer}
-                onClose={() => setSelectedOffer(null)}
-              />
+
+            {fileUploaded && (
+              <>
+                <Filters filters={filters} onChange={handleFiltersChange} />
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-muted-foreground">
+                    {totalOffers} offre{totalOffers !== 1 ? "s" : ""} trouvée
+                    {totalOffers !== 1 ? "s" : ""}
+                  </p>
+                </div>
+                {loading ? (
+                  <div className="flex items-center justify-center py-12">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+                  </div>
+                ) : (
+                  <OffersTable
+                    offers={offers}
+                    onSelectOffer={handleSelectOffer}
+                    selectedOfferId={selectedOffer?.offerId}
+                  />
+                )}
+                {selectedOffer && (
+                  <OfferDetail
+                    detail={selectedOffer}
+                    onClose={() => setSelectedOffer(null)}
+                  />
+                )}
+              </>
             )}
           </>
         )}

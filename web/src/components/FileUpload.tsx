@@ -1,12 +1,14 @@
 import { useState, useCallback } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import type { PayloadMode } from "@/types";
 
 interface FileUploadProps {
     onUploaded: () => void;
+    mode: PayloadMode;
 }
 
-export function FileUpload({ onUploaded }: FileUploadProps) {
+export function FileUpload({ onUploaded, mode }: FileUploadProps) {
     const [dragging, setDragging] = useState(false);
     const [uploading, setUploading] = useState(false);
     const [fileName, setFileName] = useState<string | null>(null);
@@ -19,7 +21,7 @@ export function FileUpload({ onUploaded }: FileUploadProps) {
             try {
                 const formData = new FormData();
                 formData.append("file", file);
-                const res = await fetch("/api/sabre/upload", {
+                const res = await fetch(`/api/${mode}/upload`, {
                     method: "POST",
                     body: formData,
                 });
@@ -36,7 +38,7 @@ export function FileUpload({ onUploaded }: FileUploadProps) {
                 setUploading(false);
             }
         },
-        [onUploaded]
+        [onUploaded, mode]
     );
 
     const handleDrop = useCallback(
@@ -57,13 +59,15 @@ export function FileUpload({ onUploaded }: FileUploadProps) {
         [uploadFile]
     );
 
+    const label = mode === "sabre" ? "SABRE Shopping" : "Metis NDC Shopping";
+
     return (
         <Card>
             <CardContent className="pt-6">
                 <div
                     className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${dragging
-                            ? "border-primary bg-primary/5"
-                            : "border-muted-foreground/25 hover:border-primary/50"
+                        ? "border-primary bg-primary/5"
+                        : "border-muted-foreground/25 hover:border-primary/50"
                         }`}
                     onDragOver={(e) => {
                         e.preventDefault();
@@ -78,7 +82,7 @@ export function FileUpload({ onUploaded }: FileUploadProps) {
                             <p className="font-medium">
                                 {fileName
                                     ? `Fichier chargé : ${fileName}`
-                                    : "Glissez un fichier JSON SABRE ici"}
+                                    : `Glissez un fichier JSON ${label} ici`}
                             </p>
                             <p className="text-sm text-muted-foreground mt-1">
                                 ou cliquez pour sélectionner

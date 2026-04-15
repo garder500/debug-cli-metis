@@ -28,9 +28,20 @@ export function Filters({ filters, onChange }: FiltersProps) {
                 />
             </div>
             <div className="space-y-1">
+                <label className="text-sm font-medium">Cabine</label>
+                <Input
+                    placeholder="ex: Premium"
+                    value={filters.cabin}
+                    onChange={(e) =>
+                        onChange({ ...filters, cabin: e.target.value })
+                    }
+                    className="w-40"
+                />
+            </div>
+            <div className="space-y-1">
                 <label className="text-sm font-medium">Brand</label>
                 <Input
-                    placeholder="ex: Business"
+                    placeholder="ex: Flex"
                     value={filters.brand}
                     onChange={(e) =>
                         onChange({ ...filters, brand: e.target.value })

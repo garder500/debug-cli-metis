@@ -5,6 +5,7 @@ export interface Offer {
     currency: string;
     company: string;
     fareBasis: string;
+    cabin: string;
     brand: string;
     directions: { label: string; segments: string[] }[];
     departureTime: string;
@@ -46,6 +47,9 @@ export interface OfferDetailData {
 
 export interface FilterState {
     flight: string;
+    cabin: string;
     brand: string;
     sort: string;
 }
+
+export type PayloadMode = "sabre" | "metis";
